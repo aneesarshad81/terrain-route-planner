@@ -153,3 +153,7 @@ World reading uses [anvil-parser / anvil-parser2](https://github.com/0xTiger/anv
 ## Author
 
 Mohammed Anees Arshad
+
+## License
+
+No license has been granted. All rights reserved. The code is published for viewing and as a portfolio example. Please contact me if you would like to reuse it.

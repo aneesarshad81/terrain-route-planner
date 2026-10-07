@@ -1,38 +1,29 @@
 #!/usr/bin/env python3
 """
-canal_path_mca_v2_2_1.py
+ridgeway_path_mca_v7_chunkerheuristic.py
+Heuristic Chunker-aware MCA -> block-accurate Ridgeway path generator.
 
-Canal Path Generator v2.2.1
+Principles:
+ - Heuristically search chunk NBT for any plausible 256-length height array.
+ - Accept many tag-name variants (bedrock_heights, BedrockHeights, Heights, Heightmap...).
+ - If no good array found, fall back to scanning chunk blocks (top -> down).
+ - Build world heightmap (Z rows × X cols) using region coordinates, then run A* pathfinder
+   at block precision with user-configured leniency / max step.
+ - Produce CSV (X,Y,Z), a PNG preview and an optional GeoTIFF for visualization.
 
-Plans a canal route between two points in a Minecraft Java 1.20.2 world.
-
-How it works:
- - Reads the world's .mca region files and builds a terrain heightmap
-   (uses chunk heightmaps when present, otherwise scans blocks from the top down).
- - Runs A* over the heightmap with a canal-specific cost:
-     * Excavation cost: terrain above the fixed water level is expensive to dig
-       through, with much steeper penalties above 5, 15 and 30 blocks.
-     * Terrain at or just above water level is cheaper.
-     * Turn penalties discourage sharp direction changes.
-     * A pull toward the straight line between the two bases keeps the route direct.
- - Outputs a CSV (X,Y,Z), a PNG preview of the route, and a heightmap preview/metadata file.
-
-Changes from v2.2: documentation header corrected (it was copied from an older
-script) and the metadata file renamed so it no longer overwrites the v7 one.
-The pathfinding code is unchanged.
-
-Dependencies:
-  pip install anvil-parser nbtlib numpy pillow tqdm scipy
+Dependencies (install in your virtual environment):
+  pip install anvil-parser nbtlib numpy pillow tqdm matplotlib scipy rasterio
 
 Usage example:
-  python3 canal_path_mca_v2_2_1.py \\
-    --region-dir="path/to/java_1.20.2_world/region" \\
-    --base-a="0,70,0" \\
-    --base-b="200,75,300" \\
-    --out-dir="output" \\
-    --water-level=68
-
-The world must be a Java 1.20.2 world (convert other versions first).
+  source path/to/your/venv/bin/activate
+  python3 ridgeway_path_mca_v7_chunkerheuristic.py \
+    --region-dir="path/to/java_1.20.2_world/region" \
+    --base-a="0,70,0" \
+    --base-b="200,75,300" \
+    --out-dir="output" \
+    --max-step=6 \
+    --leniency=small \
+    --snap-radius=96
 """
 
 import argparse
@@ -311,8 +302,7 @@ def astar_path_grid(
     start_pz,
     goal_px,
     goal_pz,
-    water_level=68,
-    corridor_width=192
+    water_level=68
 ):
     H, W = heightmap.shape
 
@@ -328,9 +318,6 @@ def astar_path_grid(
 
     start = (start_px,start_pz)
     goal  = (goal_px,goal_pz)
-
-    line_a = (start_px, start_pz)
-    line_b = (goal_px, goal_pz)
 
     open_set = []
     heapq.heappush(open_set,(abs(goal_px-start_px)+abs(goal_pz-start_pz),0,start))
@@ -415,24 +402,10 @@ def astar_path_grid(
             if dx != 0 and dz != 0:
                 step_cost += 0.15
 
-
             if abs(goal_px - nx) > 50:
                 step_cost -= 0.05
 
-            # V2.2 direct-line attraction
-            line_dist = point_to_line_distance(
-                nx, nz,
-                line_a[0], line_a[1],
-                line_b[0], line_b[1]
-            )
-
-            step_cost += line_dist * 0.08
-
-            if line_dist > corridor_width:
-                step_cost += 5000
-
             tentative_g = g + step_cost
-
             neighbor = (nx,nz)
 
             if neighbor not in gscore or tentative_g < gscore[neighbor]:
@@ -444,18 +417,6 @@ def astar_path_grid(
                 heapq.heappush(open_set,(priority,tentative_g,neighbor))
 
     return []
-
-
-def point_to_line_distance(px, pz, ax, az, bx, bz):
-    dx = bx - ax
-    dz = bz - az
-    if dx == 0 and dz == 0:
-        return 0.0
-    t = ((px-ax)*dx + (pz-az)*dz) / float(dx*dx + dz*dz)
-    t = max(0.0, min(1.0, t))
-    projx = ax + t*dx
-    projz = az + t*dz
-    return ((px-projx)**2 + (pz-projz)**2) ** 0.5
 
 # --- Main CLI --- #
 def parse_xyz(s):
@@ -489,13 +450,13 @@ def main():
     preview = (heightmap - vmin) / max(1, (vmax - vmin))
     preview_img = (np.clip(preview,0,1) * 255).astype(np.uint8)
     im = Image.fromarray(preview_img)
-    preview_path = out_dir / "heightmap_from_mca_preview_canal_v2_2.png"
+    preview_path = out_dir / "heightmap_from_mca_preview_canal_v2.png"
     im.save(preview_path)
     meta = {"origin": {"x": origin_x, "z": origin_z}, "shape": {"z": int(heightmap.shape[0]), "x": int(heightmap.shape[1])}, "min": int(vmin), "max": int(vmax)}
-    with open(out_dir / "heightmap_from_mca_meta_canal_v2_2_1.json", "w") as fh:
+    with open(out_dir / "heightmap_from_mca_meta_v7.json", "w") as fh:
         json.dump(meta, fh, indent=2)
     print(f"🖼️ Preview saved → {preview_path}")
-    print(f"🧾 Meta saved → {out_dir / 'heightmap_from_mca_meta_canal_v2_2_1.json'}")
+    print(f"🧾 Meta saved → {out_dir / 'heightmap_from_mca_meta_v7.json'}")
 
     # Snap bases: convert world coords -> pixel indices
     (ax, ay, az) = args.base_a
@@ -558,7 +519,7 @@ def main():
         path_world.append((int(wx), int(wy), int(wz)))
 
     # Save CSV
-    csv_path = out_dir / "canal_path_v2_2.csv"
+    csv_path = out_dir / "canal_path_v2.csv"
     with open(csv_path, "w") as fh:
         fh.write("X,Y,Z\n")
         for x,y,z in path_world:
@@ -596,7 +557,7 @@ def main():
                 img[y,cx] = col
     draw_cross(vis_rgb, ax_v, az_v, [0,255,0])
     draw_cross(vis_rgb, bx_v, bz_v, [0,0,255])
-    out_preview = out_dir / "canal_path_visual_v2_2.png"
+    out_preview = out_dir / "canal_path_visual_v2.png"
     Image.fromarray(vis_rgb).save(out_preview)
     print(f"🖼️ Visualization saved → {out_preview}")
 
